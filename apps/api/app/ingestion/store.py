@@ -279,6 +279,15 @@ def bulk_upsert_schedule_chunk(
     if not games:
         return counts
 
+    # Suspended games appear under BOTH their original date and their resume
+    # date in the schedule feed (same gamePk twice). Keep the LAST listing —
+    # the resume-date one carries the final state — or the bulk INSERT would
+    # collide with itself on uq_events_mlb_game_pk (production run #13).
+    deduped: dict[int, ScheduledGame] = {}
+    for game in games:
+        deduped[game.game_pk] = game
+    games = list(deduped.values())
+
     all_teams = {g.home_name: g.home_mlb_id for g in games}
     all_teams.update({g.away_name: g.away_mlb_id for g in games})
     for name, mlb_id in all_teams.items():
