@@ -78,9 +78,14 @@ def _synthetic_games(n_seasons: int = 6, per_season: int = 400) -> pd.DataFrame:
 
 class TestWalkForward:
     def test_learns_signal_and_respects_time(self):
+        import json
+
         games = _synthetic_games()
         frame = ds.build_training_frame(games, "moneyline")
         report = tr.walk_forward_report(frame, min_train_seasons=4)
+        # The report must survive json.dumps — a stray numpy scalar killed
+        # the first production training run at the finish line.
+        json.dumps(report)
         # 6 seasons, min 4 to train -> exactly 2022 and 2023 get tested.
         assert sorted(report["seasons"]) == [2022, 2023]
         for rep in report["seasons"].values():

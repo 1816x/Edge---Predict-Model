@@ -106,7 +106,9 @@ def walk_forward_report(
     frame: pd.DataFrame, min_train_seasons: int = MIN_TRAIN_SEASONS
 ) -> dict[str, Any]:
     """Train/evaluate per test season; returns nested metrics."""
-    seasons = sorted(frame["season"].unique())
+    # Plain ints: numpy int32 seasons would survive into the report and
+    # break json.dumps at the very end of a long training run.
+    seasons = sorted(int(s) for s in frame["season"].unique())
     home_rate = _expanding_home_rate(frame)
     report: dict[str, Any] = {"seasons": {}, "n_total": int(len(frame))}
 
