@@ -200,6 +200,45 @@ def test_bulk_chunk_handles_doubleheader_and_adopts_orphan(db):
 
 
 @pytest.mark.integration
+def test_bulk_chunk_dedupes_suspended_game_listed_twice(db):
+    """A suspended game appears under its original AND resume dates with the
+    same gamePk; the chunk must produce ONE event carrying the last listing
+    (production run #13 died on this)."""
+    from datetime import datetime, timezone
+
+    from app.ingestion import store
+    from app.ingestion.parsers import GameResult, ScheduledGame
+
+    def listing(when, status):
+        return ScheduledGame(
+            game_pk=567341, start_time=when, status=status,
+            home_name="Washington Nationals", away_name="Miami Marlins",
+            home_mlb_id=None, away_mlb_id=None,
+            home_probable=None, away_probable=None,
+        )
+
+    original = listing(datetime(2019, 9, 21, 20, 5, tzinfo=timezone.utc), "postponed")
+    resumed = listing(datetime(2019, 9, 22, 17, 5, tzinfo=timezone.utc), "final")
+
+    tables = store.reflect_tables(db)
+    with db.begin() as conn:
+        sport_id = store.get_sport_id(conn, tables)
+        cache = store.load_team_cache(conn, tables, sport_id)
+        counts = store.bulk_upsert_schedule_chunk(
+            conn, tables, sport_id, [original, resumed],
+            {567341: GameResult(567341, 6, 4, 3, 2)}, cache,
+        )
+
+    assert counts["events_created"] == 1
+    with db.connect() as conn:
+        row = conn.execute(
+            text("SELECT status::text, start_time_utc FROM events")
+        ).one()
+    assert row.status == "final"
+    assert row.start_time_utc.isoformat() == "2019-09-22T17:05:00+00:00"
+
+
+@pytest.mark.integration
 def test_migration_001_is_idempotent(db):
     """The deployed-DB migration must run cleanly even on a fresh schema
     that already ships the final shape."""
