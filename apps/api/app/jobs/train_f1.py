@@ -22,6 +22,7 @@ import argparse
 import json
 from typing import Any
 
+from pandas.errors import DatabaseError
 from sqlalchemy.exc import ProgrammingError
 
 from app.config import get_settings
@@ -77,9 +78,10 @@ def run(
                 "pitching_game_logs is empty; run backfill_pitching "
                 "(sp_* features are all NaN this run)"
             )
-    except ProgrammingError:
-        # Table not there yet: the training report still runs on team form
-        # alone and says so, instead of blocking on the migration.
+    except (ProgrammingError, DatabaseError):
+        # Table not there yet (pandas wraps the driver error in its own
+        # DatabaseError): the training report still runs on team form alone
+        # and says so, instead of blocking on the migration.
         out["pitching_note"] = (
             "pitching tables missing; apply migration 003 and run "
             "backfill_pitching (sp_* features are all NaN this run)"
