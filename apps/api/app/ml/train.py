@@ -85,10 +85,15 @@ def _metrics(y: np.ndarray, p: np.ndarray) -> dict[str, float]:
 def _prep_matrix(
     frame: pd.DataFrame, medians: pd.Series | None = None
 ) -> tuple[np.ndarray, pd.Series]:
-    """Median-impute NaNs (medians learned on train only — no leakage)."""
+    """Median-impute NaNs (medians learned on train only — no leakage).
+
+    A column that is 100% NaN on the training window (e.g. the sp_* block
+    before the pitching backfill runs) has NaN median; it falls back to 0.0
+    so sklearn still fits — the report's sp_coverage exposes the situation.
+    """
     x = frame[FEATURE_COLUMNS]
     if medians is None:
-        medians = x.median()
+        medians = x.median().fillna(0.0)
     return x.fillna(medians).to_numpy(dtype=float), medians
 
 
