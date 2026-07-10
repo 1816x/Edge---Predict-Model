@@ -29,6 +29,8 @@ from app.config import get_settings
 from app.db.engine import make_engine
 from app.ml.dataset import (
     build_training_frame,
+    feature_columns,
+    load_bullpen_frame,
     load_market_prior,
     load_pitching_frame,
     load_results_frame,
@@ -70,13 +72,16 @@ def run(
         return out
 
     pitching = None
+    bullpen = None
     try:
         pitching = load_pitching_frame(engine)
+        bullpen = load_bullpen_frame(engine)
         if len(pitching) == 0:
             pitching = None
+            bullpen = None
             out["pitching_note"] = (
                 "pitching_game_logs is empty; run backfill_pitching "
-                "(sp_* features are all NaN this run)"
+                "(sp_*/bullpen_* features are all NaN this run)"
             )
     except (ProgrammingError, DatabaseError):
         # Table not there yet (pandas wraps the driver error in its own
@@ -84,11 +89,11 @@ def run(
         # and says so, instead of blocking on the migration.
         out["pitching_note"] = (
             "pitching tables missing; apply migration 003 and run "
-            "backfill_pitching (sp_* features are all NaN this run)"
+            "backfill_pitching (sp_*/bullpen_* features are all NaN this run)"
         )
 
     for market in markets:
-        frame = build_training_frame(games, market, pitching)
+        frame = build_training_frame(games, market, pitching, bullpen)
         prior = load_market_prior(engine, market)
         frame = frame.merge(prior, on="event_id", how="left")
         out["markets"][market] = {
@@ -99,7 +104,9 @@ def run(
             # pitching archive worth investigating before quoting metrics.
             "sp_coverage": _sp_coverage(frame),
             "rows_with_market_prior": int(frame["market_prior_p_home"].notna().sum()),
-            "report": walk_forward_report(frame, min_train_seasons),
+            "report": walk_forward_report(
+                frame, min_train_seasons, feature_columns(market)
+            ),
         }
     return out
 
