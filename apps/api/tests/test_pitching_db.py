@@ -247,6 +247,22 @@ def test_migration_003_is_idempotent(db):
     assert first["statements"] == second["statements"] == 9
 
 
+@pytest.mark.integration
+def test_migration_004_is_idempotent(db):
+    """Runs through the REAL apply_migration splitter (the naive ';' split
+    that a semicolon inside a comment famously broke in migration 003)."""
+    from pathlib import Path
+
+    from app.jobs import apply_migration
+
+    migration = Path(__file__).parents[3] / "infra" / "migrations" / "004-batting-game-logs.sql"
+    first = apply_migration.run(str(migration), engine=db)
+    second = apply_migration.run(str(migration), engine=db)
+    # 1 tabla + 2 índices + 1 drop trigger + 1 create trigger (BEGIN/COMMIT
+    # los salta el splitter).
+    assert first["statements"] == second["statements"] == 5
+
+
 def test_backfill_pitching_rejects_inverted_range():
     with pytest.raises(ValueError, match="before start_date"):
         backfill_pitching.run(
