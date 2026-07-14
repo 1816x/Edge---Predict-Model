@@ -372,8 +372,18 @@ def parse_boxscore_batting(payload: dict[str, Any]) -> BoxscoreBatting:
             home_runs = _zero("homeRuns")
             intentional_walks, hit_by_pitch = _zero("intentionalWalks"), _zero("hitByPitch")
             sac_flies, sac_bunts = _zero("sacFlies"), _zero("sacBunts")
+            counting = (
+                at_bats, hits, doubles, triples, home_runs, walks,
+                intentional_walks, strikeouts, hit_by_pitch, sac_flies, sac_bunts,
+            )
+            # The negative guard runs BEFORE the zero-PA check on purpose: a
+            # negative sac fly could zero out the derived PA and silently
+            # reclassify a real line as a normal substitution. One negative
+            # anywhere would also violate the table's CHECKs and roll back
+            # the whole chunk's transaction — better one loud dropped line.
             if (
-                hits > at_bats
+                any(v < 0 for v in counting)
+                or hits > at_bats
                 or doubles + triples + home_runs > hits
                 or intentional_walks > walks
             ):
@@ -388,7 +398,15 @@ def parse_boxscore_batting(payload: dict[str, Any]) -> BoxscoreBatting:
                 batting_order = None
             if batting_order is not None and batting_order < 100:
                 batting_order = None  # sub-100 slots are junk, not lineup data
-            pa = stats.get("plateAppearances")
+            # Audit fields must never be able to kill the run: junk (non-
+            # numeric or negative) plateAppearances degrades to None, same
+            # treatment as battingOrder above.
+            try:
+                pa = int(stats.get("plateAppearances"))
+            except (TypeError, ValueError):
+                pa = None
+            if pa is not None and pa < 0:
+                pa = None
             kept += 1
             lines.append(
                 BattingLine(
@@ -407,7 +425,7 @@ def parse_boxscore_batting(payload: dict[str, Any]) -> BoxscoreBatting:
                     sac_flies=sac_flies,
                     sac_bunts=sac_bunts,
                     batting_order=batting_order,
-                    plate_appearances=None if pa is None or int(pa) < 0 else int(pa),
+                    plate_appearances=pa,
                 )
             )
         if considered and not kept:

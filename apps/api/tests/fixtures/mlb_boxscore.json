@@ -107,8 +107,15 @@
         "ID700002": {
           "person": {"id": 700002, "fullName": "Old Data Lefty"},
           "position": {"code": "1", "abbreviation": "P"},
+          "battingOrder": "900",
           "stats": {
-            "batting": {},
+            "batting": {
+              "atBats": 2,
+              "hits": 0,
+              "baseOnBalls": 0,
+              "strikeOuts": 2,
+              "plateAppearances": 2
+            },
             "pitching": {
               "inningsPitched": "5.2",
               "battersFaced": 23,

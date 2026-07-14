@@ -101,16 +101,23 @@ def test_backfill_pitching_ingests_resumes_and_forces(db):
     # feature reads.
     assert summary["hands_backfilled"] == 2
     assert client.people_calls == [[700001, 700002]]
-    # Batting rides the same fetch: 3 kept lines per boxscore (broken
-    # batter dropped with anomaly, pinch runner skipped as zero-PA).
-    assert summary["batting_lines_upserted"] == 6
+    # Batting rides the same fetch: 4 kept lines per boxscore — catcher,
+    # DH, away leadoff AND the away starter's own batting line (two-way
+    # case). The broken batter drops with an anomaly and the pinch runner
+    # is skipped as zero-PA. Asserting the anomaly CONTENT (not just the
+    # count) pins the job wiring: the zero-PA and anomaly counters are
+    # both 2 here and a transposition would otherwise pass the suite.
+    assert summary["batting_lines_upserted"] == 8
     assert summary["batting_zero_pa_skipped"] == 2
     assert summary["batting_anomalies_total"] == 2
+    assert summary["batting_anomalies"][0].endswith(
+        "away:700020:batting_missing:atBats"
+    )
     assert "batting_note" not in summary
 
     with db.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM pitching_game_logs")).scalar() == 6
-        assert conn.execute(text("SELECT count(*) FROM batting_game_logs")).scalar() == 6
+        assert conn.execute(text("SELECT count(*) FROM batting_game_logs")).scalar() == 8
         starters = conn.execute(
             text(
                 """
@@ -127,6 +134,9 @@ def test_backfill_pitching_ingests_resumes_and_forces(db):
             conn.execute(text("SELECT mlb_person_id, pitch_hand FROM players")).all()
         )
         # Pitchers resolved; batters stored with hand NULL (never asked).
+        # 700002 is the two-way case (pitching AND batting line in the same
+        # box): his batter entry must not clobber the pitcher entry, and his
+        # /people-resolved hand must survive.
         assert hands == {
             608566: "R", 700001: "R", 700002: "L",
             700010: None, 700011: None, 700021: None,
@@ -179,11 +189,11 @@ def test_backfill_pitching_ingests_resumes_and_forces(db):
     )
     assert refill["boxscores_fetched"] == 1
     assert refill["events_skipped_existing"] == 1
-    assert refill["batting_lines_upserted"] == 3
+    assert refill["batting_lines_upserted"] == 4
     assert refill["lines_upserted"] == 0  # pitching half untouched
     with db.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM pitching_game_logs")).scalar() == 6
-        assert conn.execute(text("SELECT count(*) FROM batting_game_logs")).scalar() == 6
+        assert conn.execute(text("SELECT count(*) FROM batting_game_logs")).scalar() == 8
 
     # Force: re-fetches, upserts in place (no duplicate rows), and the hands
     # already stored are not re-asked to /people.
@@ -195,7 +205,21 @@ def test_backfill_pitching_ingests_resumes_and_forces(db):
     assert len(client.people_calls) == people_calls_before
     with db.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM pitching_game_logs")).scalar() == 6
-        assert conn.execute(text("SELECT count(*) FROM batting_game_logs")).scalar() == 6
+        assert conn.execute(text("SELECT count(*) FROM batting_game_logs")).scalar() == 8
+
+    # Force across CHUNKS: the fake client lists the same games for every
+    # chunk (the suspended-game shape: one gamePk under two dates). The
+    # run-level dedupe must process each game once — without it the same
+    # boxscore is fetched, deleted and re-upserted per chunk and every
+    # summary counter it touches counts double.
+    two_day = backfill_pitching.run(
+        "2024-06-01", "2024-06-02", client=client, engine=db,
+        sleep_seconds=0, force=True, chunk_days=1,
+    )
+    assert two_day["boxscores_fetched"] == 2  # one per REAL game, not per chunk
+    assert two_day["batting_lines_upserted"] == 8
+    with db.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM batting_game_logs")).scalar() == 8
 
 
 @pytest.mark.integration

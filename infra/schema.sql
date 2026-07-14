@@ -161,7 +161,7 @@ CREATE TABLE event_results (
 );
 
 -- ============================================================================
--- Players, pitching game logs and probables (F1 starter block)
+-- Players, game logs (pitching + batting) and probables (F1 blocks)
 -- ============================================================================
 
 -- Generic player dimension (not just pitchers: the lineup block reuses it).

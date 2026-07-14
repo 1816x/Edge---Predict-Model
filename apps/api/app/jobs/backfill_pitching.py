@@ -15,7 +15,10 @@ batting fill cheap to express: re-running a season that already has
 pitching re-fetches each boxscore once and writes only batting.
 ``--force`` re-fetches everything in range and replaces both tables'
 rows (boxscore corrections can REMOVE lines; upserts alone never
-converge on that).
+converge on that) — with one deliberate exception: a re-fetch whose
+parse yields ZERO kept lines for a half keeps that half's existing rows
+(deleting real data on a transient feed hiccup would be worse) and the
+situation surfaces through the parse/batting anomaly counters instead.
 
 Degradation contract: with migration 004 not applied yet, the batting
 half is skipped with ``batting_note`` and pitching ingestion continues
@@ -153,6 +156,14 @@ def run(
 
     events_t = tables["events"]
     logs_t = tables["pitching_game_logs"]
+    # Run-level dedupe: a suspended game lists under BOTH its original and
+    # resume dates. Within one chunk the dict dedupe below handles it, and
+    # without --force the per-chunk skip sets catch the cross-chunk repeat
+    # (the first chunk's upserts are visible to the second chunk's query) —
+    # but under --force those sets stay empty and the same game would be
+    # fetched, deleted and re-upserted twice, double-counting every summary
+    # counter it touches.
+    processed_pks: set[int] = set()
     with engine.connect() as conn:
         player_cache = store.load_player_cache(conn, tables)
         known_hands = {
@@ -226,11 +237,15 @@ def run(
                 summary["missing_events_total"] += 1
                 _capped_append(summary, "missing_events", str(game.game_pk))
                 continue
+            if game.game_pk in processed_pks:
+                summary["events_skipped_existing"] += 1
+                continue
             need_pitch = event.id not in have_logs
             need_bat = batting_enabled and event.id not in have_batting
             if not need_pitch and not need_bat:
                 summary["events_skipped_existing"] += 1
                 continue
+            processed_pks.add(game.game_pk)
             pending.append((game, event, need_pitch, need_bat))
 
         chunk_lines: list[tuple[Any, list]] = []  # (event row, pitching lines)

@@ -211,10 +211,11 @@ class TestParseBoxscoreBatting:
 
     def test_kept_dropped_and_skipped(self):
         box = self._parsed()
-        # Kept: catcher + DH (home), leadoff (away). The broken batter is
+        # Kept: catcher + DH (home), leadoff + the STARTING PITCHER's own
+        # batting line (away — two-way/NL case). The broken batter is
         # dropped (missing atBats), the pinch runner has zero derived PA,
-        # and pitchers with empty batting blocks never count.
-        assert {l.mlb_person_id for l in box.lines} == {700010, 700011, 700021}
+        # and pitchers with EMPTY batting blocks never count.
+        assert {l.mlb_person_id for l in box.lines} == {700010, 700011, 700021, 700002}
         assert box.anomalies == ("away:700020:batting_missing:atBats",)
         assert box.zero_pa_skipped == 1
 
@@ -243,11 +244,13 @@ class TestParseBoxscoreBatting:
         payload = load_fixture("mlb_boxscore.json")
         away = payload["teams"]["away"]["players"]
         away["ID700021"]["stats"]["batting"]["hits"] = 6  # > atBats 5
+        away["ID700002"]["stats"]["batting"]["hits"] = 3  # > atBats 2 (two-way)
         box = parse_boxscore_batting(payload)
         assert all(not l.mlb_person_id == 700021 for l in box.lines)
         assert "away:700021:batting_inconsistent" in box.anomalies
-        # Both away batters are now gone: exactly what a field-name drift
-        # would look like — it must be loud.
+        # Every away batting line is now gone (two inconsistent + one with
+        # missing required stats): exactly what a field-name drift would
+        # look like — it must be loud.
         assert "away:no_batting_lines_kept" in box.anomalies
 
     def test_junk_batting_order_becomes_none(self):
@@ -265,3 +268,38 @@ class TestParseBoxscoreBatting:
         # the JOB flags it via the per-side counters when lines were expected.
         box = parse_boxscore_batting({"teams": {"home": {}, "away": {}}})
         assert box.lines == () and box.zero_pa_skipped == 0
+
+    def test_negative_count_dropped_before_it_can_poison_the_chunk(self):
+        # A negative count would violate the table CHECKs and roll back the
+        # whole chunk transaction — the parser must drop the LINE instead.
+        # strikeOuts is the nastiest case: no relational check touches it.
+        payload = load_fixture("mlb_boxscore.json")
+        home = payload["teams"]["home"]["players"]
+        home["ID700010"]["stats"]["batting"]["strikeOuts"] = -1
+        box = parse_boxscore_batting(payload)
+        assert all(l.mlb_person_id != 700010 for l in box.lines)
+        assert "home:700010:batting_inconsistent" in box.anomalies
+
+    def test_negative_sac_fly_cannot_masquerade_as_zero_pa_sub(self):
+        # sacFlies -1 on a line whose other PA components are 0 would zero
+        # the derived PA and silently reclassify a real line as a pinch
+        # runner; the negative guard must fire FIRST, loudly.
+        payload = load_fixture("mlb_boxscore.json")
+        home = payload["teams"]["home"]["players"]
+        home["ID700011"]["stats"]["batting"].update(
+            {"atBats": 1, "hits": 0, "homeRuns": 0, "baseOnBalls": 0, "sacFlies": -1}
+        )
+        box = parse_boxscore_batting(payload)
+        assert "home:700011:batting_inconsistent" in box.anomalies
+        assert box.zero_pa_skipped == 1  # only the real pinch runner
+
+    def test_junk_plate_appearances_degrades_to_none_not_a_crash(self):
+        # plateAppearances is an audit field and must never kill the run:
+        # non-numeric junk degrades to None like battingOrder does.
+        payload = load_fixture("mlb_boxscore.json")
+        home = payload["teams"]["home"]["players"]
+        home["ID700010"]["stats"]["batting"]["plateAppearances"] = "TBD"
+        box = parse_boxscore_batting(payload)
+        catcher = next(l for l in box.lines if l.mlb_person_id == 700010)
+        assert catcher.plate_appearances is None
+        assert catcher.at_bats == 4  # the rest of the line is intact
