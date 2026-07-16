@@ -463,6 +463,25 @@ def test_migration_005_is_idempotent(db):
     assert first["statements"] == second["statements"] == 2
 
 
+@pytest.mark.integration
+def test_migration_006_is_idempotent(db):
+    """Through the REAL apply_migration splitter: the F1.4 transactions/IL
+    archive. A ';' inside any comment would split it mid-line and inflate the
+    statement count (the migration-003 bug this guards against — caught exactly
+    that in this migration's first draft: 'docs/04 §1.5; y ...')."""
+    from pathlib import Path
+
+    from app.jobs import apply_migration
+
+    migration = (
+        Path(__file__).parents[3] / "infra" / "migrations" / "006-player-transactions.sql"
+    )
+    first = apply_migration.run(str(migration), engine=db)
+    second = apply_migration.run(str(migration), engine=db)
+    # 1 tabla + 1 índice (BEGIN/COMMIT los salta el splitter).
+    assert first["statements"] == second["statements"] == 2
+
+
 def test_backfill_pitching_rejects_inverted_range():
     with pytest.raises(ValueError, match="before start_date"):
         backfill_pitching.run(
