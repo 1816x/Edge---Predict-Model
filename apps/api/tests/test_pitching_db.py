@@ -356,6 +356,55 @@ def test_sync_lineups_survives_a_boxscore_error(db):
     assert result["snapshots_new"] == 0  # nothing archived, but no crash
 
 
+class FakeTxnClient:
+    """Serves the transactions fixture for any date range and counts calls."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def get_transactions(self, start_date, end_date, sport_id: int = 1):
+        self.calls.append((start_date, end_date))
+        return load_fixture("mlb_transactions.json")
+
+
+@pytest.mark.integration
+def test_sync_transactions_idempotent_with_drift_canary(db):
+    """The transactions/IL archive job: idempotent by mlb_transaction_id, and
+    the summary counts IL placements/activations plus the il_desc_unclassified
+    drift canary (0 when every IL-mention classifies)."""
+    from app.ingestion import store
+    from app.jobs import sync_transactions
+
+    # Seed the Yankees so from_team resolves (unknown teams stay NULL).
+    tables = store.reflect_tables(db, ("sports", "teams", "players"))
+    with db.begin() as conn:
+        sport_id = store.get_sport_id(conn, tables)
+        store.get_or_create_team(conn, tables, sport_id, H, 147)
+
+    client = FakeTxnClient()
+    first = sync_transactions.run(
+        "2026-07-10", "2026-07-13", client=client, engine=db, sleep_seconds=0.0
+    )
+    assert first["transactions_seen"] == 4
+    assert first["transactions_upserted"] == 4
+    # 900001 placed + 900007 transferred-to-60-day = 2 placements; 900002 = 1
+    # activation; the 2019-era "disabled list" wording would also classify.
+    assert first["il_placements"] == 2
+    assert first["il_activations"] == 1
+    assert first["il_desc_unclassified_total"] == 0
+    assert first["parse_anomalies_total"] == 3  # no-person, no-id, no-date
+
+    # Re-run: idempotent (no duplicate rows by natural key).
+    second = sync_transactions.run(
+        "2026-07-10", "2026-07-13", client=client, engine=db, sleep_seconds=0.0
+    )
+    assert second["transactions_upserted"] == 4
+    with db.connect() as conn:
+        assert conn.execute(
+            text("SELECT count(*) FROM player_transactions")
+        ).scalar() == 4
+
+
 @pytest.mark.integration
 def test_placeholder_name_never_clobbers_real_name(db):
     from app.ingestion import store
