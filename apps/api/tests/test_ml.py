@@ -1,6 +1,6 @@
 """F1 pipeline: metric sanity, synthetic walk-forward, bulk-vs-online parity."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -281,8 +281,11 @@ class TestBullpenFeatures:
         # The lineup block (docs/04 §1.5) also enters BOTH vectors: 3 per side.
         assert sum("lineup" in c or "top4" in c for c in ml.columns) == 6
         assert sum("lineup" in c or "top4" in c for c in f5.columns) == 6
-        assert len(ds.FEATURE_COLUMNS) == 60
-        assert len(ds.F5_FEATURE_COLUMNS) == 52
+        # star_out_flag (§1.5, F1.4) enters BOTH vectors too: 1 per side.
+        assert sum("star_out_flag" in c for c in ml.columns) == 2
+        assert sum("star_out_flag" in c for c in f5.columns) == 2
+        assert len(ds.FEATURE_COLUMNS) == 62
+        assert len(ds.F5_FEATURE_COLUMNS) == 54
         assert ds.feature_columns("f5_moneyline") == ds.F5_FEATURE_COLUMNS
 
 
@@ -565,6 +568,99 @@ class TestLineupFeatures:
         assert pm["home_lineup_woba_proj"] == pytest.approx(round((0.877 * 4 + 32) / 110, 4))
 
 
+def _txn_frame(rows):
+    """rows: list of (player_id, date, effect_desc, txn_id)."""
+    return pd.DataFrame(
+        [
+            dict(
+                player_id=pid,
+                type_code="SC",
+                type_desc="Status Change",
+                description=desc,
+                transaction_date=d,
+                mlb_transaction_id=tid,
+            )
+            for pid, d, desc, tid in rows
+        ]
+    )
+
+
+class TestStarOutFlag:
+    """Bulk star_out_flag (docs/04 §1.5): count of the team's top-2 established
+    batters on the IL as-of the game. STAR clears the 200 PA (wOBA-denom) gate
+    from one big prior game; p2 is a thin sample that never qualifies."""
+
+    def _frames(self):
+        # STAR: 250 AB + 20 BB in the prior game -> den 270 >= 200 (a star).
+        # p2: tiny sample, plays g1 so the realized lineup is non-empty.
+        lineup = pd.DataFrame(
+            [
+                _lineup_row("h0", (2024, 4, 10), "STAR", True, None, "R", 250, 80, 20),
+                _lineup_row("g1", (2024, 4, 20), "p2", True, 100, "R", 4, 1, 0),
+            ]
+        )
+        lineup["start_time_utc"] = pd.to_datetime(lineup["start_time_utc"], utc=True)
+        games = pd.DataFrame(
+            [dict(event_id="g1", home_team_id="T1", away_team_id="T2",
+                  start_time_utc=datetime(2024, 4, 20, 20, 0, tzinfo=timezone.utc))]
+        )
+        games["start_time_utc"] = pd.to_datetime(games["start_time_utc"], utc=True)
+        return lineup, games
+
+    def _star_out(self, txns):
+        lineup, games = self._frames()
+        feats = ds._lineup_features(lineup, games, {("g1", "home"): "R"}, txns)
+        return feats[feats["event_id"] == "g1"].iloc[0]["home_star_out_flag"]
+
+    _PLACED = "placed on the 10-day injured list"
+    _ACTIVATED = "activated from the 10-day injured list"
+
+    def test_star_on_il_before_the_game_counts_one(self):
+        txns = _txn_frame([("STAR", date(2024, 4, 15), self._PLACED, 1)])
+        assert self._star_out(txns) == 1.0
+
+    def test_star_activated_before_the_game_counts_zero(self):
+        txns = _txn_frame([
+            ("STAR", date(2024, 4, 15), self._PLACED, 1),
+            ("STAR", date(2024, 4, 18), self._ACTIVATED, 2),
+        ])
+        assert self._star_out(txns) == 0.0
+
+    def test_archive_not_alive_as_of_is_nan_never_zero(self):
+        # The only move is ON the game day -> nothing strictly before it -> the
+        # archive is not alive as-of -> unknown (NaN), never a fabricated 0.
+        txns = _txn_frame([("STAR", date(2024, 4, 20), self._PLACED, 1)])
+        assert pd.isna(self._star_out(txns))
+
+    def test_no_transactions_frame_is_nan(self):
+        assert pd.isna(self._star_out(None))
+
+    def test_same_day_move_excluded_but_archive_alive_is_zero(self):
+        # An earlier UNRELATED move keeps the archive alive; STAR's own move is
+        # same-day (excluded) -> STAR not known out -> a TRUE zero.
+        txns = _txn_frame([
+            ("someone", date(2024, 4, 1), self._PLACED, 9),
+            ("STAR", date(2024, 4, 20), self._PLACED, 1),
+        ])
+        assert self._star_out(txns) == 0.0
+
+    def test_no_qualifying_star_is_nan_even_with_il_moves(self):
+        # Only a thin-sample batter exists: no established star to speak of, so
+        # the flag is unknown (NaN) even though the archive is alive.
+        lineup = pd.DataFrame(
+            [_lineup_row("g1", (2024, 4, 20), "p2", True, 100, "R", 4, 1, 0)]
+        )
+        lineup["start_time_utc"] = pd.to_datetime(lineup["start_time_utc"], utc=True)
+        games = pd.DataFrame(
+            [dict(event_id="g1", home_team_id="T1", away_team_id="T2",
+                  start_time_utc=datetime(2024, 4, 20, 20, 0, tzinfo=timezone.utc))]
+        )
+        games["start_time_utc"] = pd.to_datetime(games["start_time_utc"], utc=True)
+        txns = _txn_frame([("p2", date(2024, 4, 15), self._PLACED, 1)])
+        feats = ds._lineup_features(lineup, games, {}, txns)
+        assert pd.isna(feats.iloc[0]["home_star_out_flag"])
+
+
 class TestMarketPriorSubset:
     def _frame(self):
         return ds.build_training_frame(_synthetic_games(), "moneyline")
@@ -728,6 +824,7 @@ def test_bulk_features_match_online_builder(seeded):
         load_bullpen_frame,
         load_lineup_frame,
         load_pitching_frame,
+        load_transactions_frame,
     )
 
     db, tables, target_id = seeded
@@ -745,6 +842,7 @@ def test_bulk_features_match_online_builder(seeded):
         games, "moneyline",
         pitching=load_pitching_frame(db), bullpen=load_bullpen_frame(db),
         batting=load_batting_frame(db), lineup=load_lineup_frame(db),
+        transactions=load_transactions_frame(db),
     )
     with db.connect() as conn:
         # as_of == start time (training convention) for the July 6th game,
@@ -765,6 +863,10 @@ def test_bulk_features_match_online_builder(seeded):
         # lineup wOBA features must byte-match (per-batter wOBA is strictly
         # prior in both paths); lineup_is_confirmed is checked separately.
         "lineup_woba_proj", "top4_woba_vs_hand",
+        # star_out_flag must byte-match too (None==NaN here: the seed has no
+        # 200-PA star, so both paths agree it is unknown — the real non-vacuous
+        # online==bulk check is test_star_out_flag_online_matches_bulk).
+        "star_out_flag",
         *ds.SP_FEATURE_NAMES,
         *ds.BP_FEATURE_NAMES,
     ):
@@ -787,3 +889,88 @@ def test_bulk_features_match_online_builder(seeded):
     assert online["home"]["lineup_woba_proj"] is not None
     assert online["away"]["lineup_woba_proj"] is not None
     assert online["away"]["top4_woba_vs_hand"] is not None
+
+
+@pytest.mark.integration
+def test_star_out_flag_online_matches_bulk(db):
+    """A qualifying star on the IL: the online builder (_star_out_block, SQL)
+    and the bulk dataset (_lineup_features, pandas) must produce the SAME
+    star_out_flag — a REAL non-vacuous value, the parity guard for this feature."""
+    from datetime import date
+    from datetime import datetime as dt
+
+    from sqlalchemy import text
+
+    from app.features import builder
+    from app.ingestion import store
+    from app.ingestion.parsers import BattingLine, PlayerTransaction, ScheduledGame
+    from app.ml import dataset as ds
+
+    H, A = "Boston Red Sox", "New York Yankees"
+    STAR = 850001
+    tables = store.reflect_tables(db, builder.FEATURE_TABLES + ("sports", "teams"))
+    prior = dt(2026, 6, 1, 23, 0, tzinfo=timezone.utc)
+    target = dt(2026, 7, 1, 23, 0, tzinfo=timezone.utc)
+
+    with db.begin() as conn:
+        conn.execute(text("TRUNCATE players CASCADE"))
+        sport_id = store.get_sport_id(conn, tables)
+        gp, _ = store.upsert_event_from_schedule(
+            conn, tables, sport_id,
+            ScheduledGame(game_pk=850100, start_time=prior, status="final",
+                          home_name=A, away_name=H, home_mlb_id=147, away_mlb_id=111,
+                          home_probable=None, away_probable=None),
+        )
+        gt, _ = store.upsert_event_from_schedule(
+            conn, tables, sport_id,
+            ScheduledGame(game_pk=850101, start_time=target, status="scheduled",
+                          home_name=H, away_name=A, home_mlb_id=111, away_mlb_id=147,
+                          home_probable=None, away_probable=None),
+        )
+        cache = store.load_player_cache(conn, tables)
+        store.bulk_upsert_players(
+            conn, tables, sport_id,
+            [{"mlb_person_id": STAR, "full_name": "The Star", "pitch_hand": None}], cache,
+        )
+        teams = store.load_team_cache(conn, tables, sport_id)
+        # STAR bats a big prior game for A (home in gp): wOBA denom >= 200.
+        store.bulk_upsert_batting_logs(
+            conn, tables, gp, teams[A], teams[H],
+            [BattingLine(mlb_person_id=STAR, full_name="The Star", is_home=True,
+                         at_bats=250, hits=80, doubles=0, triples=0, home_runs=0,
+                         walks=20, intentional_walks=0, strikeouts=0, hit_by_pitch=0,
+                         sac_flies=0, sac_bunts=0, batting_order=100,
+                         plate_appearances=None)],
+            cache,
+        )
+        team_by_mlb = store.load_team_cache_by_mlb_id(conn, tables, sport_id)
+        store.bulk_upsert_transactions(
+            conn, tables,
+            [PlayerTransaction(
+                mlb_transaction_id=1, mlb_person_id=STAR, full_name="The Star",
+                from_team_mlb_id=147, to_team_mlb_id=147, type_code="SC",
+                type_desc="Status Change",
+                description="New York Yankees placed The Star on the 10-day injured list.",
+                transaction_date=date(2026, 6, 15))],
+            cache, team_by_mlb,
+        )
+
+    with db.connect() as conn:
+        online = builder.build_features(conn, tables, gt, "moneyline", target)
+        # Build the bulk games frame from the SAME driver so team_id types match
+        # load_lineup_frame's (both via read_sql).
+        games_df = pd.read_sql(
+            text("SELECT id AS event_id, home_team_id, away_team_id, start_time_utc "
+                 "FROM events WHERE id = :id"),
+            conn, params={"id": str(gt)},
+        )
+    games_df["start_time_utc"] = pd.to_datetime(games_df["start_time_utc"], utc=True)
+    feats = ds._lineup_features(
+        ds.load_lineup_frame(db), games_df, {}, ds.load_transactions_frame(db)
+    )
+    bulk_row = feats.iloc[0]
+
+    # A is the AWAY team of the target game; its lone established star is on IL.
+    assert online["away"]["star_out_flag"] == 1
+    assert bulk_row["away_star_out_flag"] == 1
+    assert online["away"]["star_out_flag"] == bulk_row["away_star_out_flag"]

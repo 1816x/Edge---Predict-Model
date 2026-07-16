@@ -4,7 +4,14 @@ Hand-computed classifier cases, including the pre-2019 "disabled list" wording
 that the 2018 backfill must still classify (the DL was renamed the IL in 2019).
 """
 
-from app.features.transactions import il_effect, mentions_il
+from datetime import date
+
+from app.features.transactions import (
+    il_effect,
+    il_out_asof,
+    mentions_il,
+    top_k_star_players,
+)
 
 
 class TestIlEffect:
@@ -80,3 +87,61 @@ class TestIlEffect:
         assert mentions_il(None, "placed on the injured list") is True
         assert mentions_il(None, "placed on the disabled list") is True
         assert mentions_il("Trade", "traded to the Red Sox") is False
+
+
+class TestIlOutAsof:
+    G = date(2024, 4, 20)  # the game day (as-of cut is < G)
+
+    def test_no_moves_is_available(self):
+        assert il_out_asof([], self.G) is False
+
+    def test_latest_move_before_cut_is_a_placement(self):
+        moves = [(date(2024, 4, 10), 1, 1)]
+        assert il_out_asof(moves, self.G) is True
+
+    def test_latest_move_is_an_activation(self):
+        moves = [(date(2024, 4, 10), 1, 1), (date(2024, 4, 18), 2, -1)]
+        assert il_out_asof(moves, self.G) is False
+
+    def test_move_on_the_game_day_is_unknown(self):
+        # date == event_day is NOT < event_day: a same-day move is not yet known.
+        moves = [(date(2024, 4, 20), 5, 1)]
+        assert il_out_asof(moves, self.G) is False
+
+    def test_same_date_reversal_breaks_by_transaction_id(self):
+        # Placed (id 10) then activated (id 11) on the SAME earlier date: the
+        # higher id is the later move -> activated -> available. The tiebreak is
+        # identical in the online and bulk paths, so both agree.
+        placed_then_activated = [(date(2024, 4, 12), 10, 1), (date(2024, 4, 12), 11, -1)]
+        assert il_out_asof(placed_then_activated, self.G) is False
+        # Reverse ids: activated (10) then placed (11) same day -> still out.
+        activated_then_placed = [(date(2024, 4, 12), 11, 1), (date(2024, 4, 12), 10, -1)]
+        assert il_out_asof(activated_then_placed, self.G) is True
+
+
+class TestTopKStarPlayers:
+    def _sums(self, ab, bb=0, hits=0, hr=0):
+        return {
+            "at_bats": ab, "hits": hits, "doubles": 0, "triples": 0, "home_runs": hr,
+            "walks": bb, "intentional_walks": 0, "strikeouts": 0, "hit_by_pitch": 0,
+            "sac_flies": 0, "sac_bunts": 0,
+        }
+
+    def test_thin_samples_are_not_stars(self):
+        # den = at_bats + walks; below LINEUP_STAR_MIN_PA (200) -> not a star.
+        players = {"a": self._sums(ab=100, hits=40, hr=10)}
+        assert top_k_star_players(players) == []
+
+    def test_ranks_by_woba_and_caps_at_k(self):
+        players = {
+            "weak": self._sums(ab=300, hits=60, hr=2),    # low wOBA, qualifies
+            "strong": self._sums(ab=300, hits=120, hr=30),  # high wOBA
+            "mid": self._sums(ab=300, hits=90, hr=15),
+        }
+        assert top_k_star_players(players, k=2) == ["strong", "mid"]
+
+    def test_tiebreak_is_deterministic_by_player_id_string(self):
+        # Two identical lines -> identical wOBA -> ordered by str(player_id).
+        line = self._sums(ab=300, hits=90, hr=15)
+        players = {"zeta": dict(line), "alpha": dict(line)}
+        assert top_k_star_players(players, k=1) == ["alpha"]
