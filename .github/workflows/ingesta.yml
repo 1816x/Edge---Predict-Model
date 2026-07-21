@@ -63,6 +63,7 @@ on:
           - audit_snapshots
           - train_f1
           - apply_migration
+          - repair_orphan_events
       args:
         description: 'Args extra (ej. --start-date 2024-03-20 --end-date 2024-10-01)'
         type: string
@@ -127,6 +128,7 @@ jobs:
               audit_snapshots)       python -m app.jobs.audit_snapshots $INPUT_ARGS ;;
               train_f1)              pip install --quiet "./apps/api[ml]" && python -m app.jobs.train_f1 $INPUT_ARGS ;;
               apply_migration)       python -m app.jobs.apply_migration $INPUT_ARGS ;;
+              repair_orphan_events)  python -m app.jobs.repair_orphan_events $INPUT_ARGS ;;
               *) echo "job desconocido: $INPUT_JOB" >&2; exit 1 ;;
             esac
           elif [ "$SCHEDULE" = "17 14 * * *" ]; then
